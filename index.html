@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IR 扣點管理系統</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- SheetJS：Excel 匯入/匯出（跟原本 openpyxl 功能對應） -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- Google 登入 + 設定 -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="config.js"></script>
+<style>
+  [x-cloak]{display:none}
+  body:not(.authed) #mainui{display:none}
+  body.authed #gate{display:none}
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen text-sm text-slate-800">
+
+<!-- ===== 登入閘門 ===== -->
+<div id="gate" class="fixed inset-0 bg-slate-800 text-white flex items-center justify-center z-50 px-6">
+  <div class="text-center max-w-sm w-full">
+    <h1 class="text-2xl font-bold mb-1">IR 扣點管理系統</h1>
+    <p class="text-slate-400 text-xs tracking-wide mb-8">POINT MANAGEMENT</p>
+    <div id="gBtn" class="flex justify-center min-h-[44px]"></div>
+    <p id="gateMsg" class="mt-5 text-red-300 text-xs min-h-[16px] leading-relaxed"></p>
+    <p class="mt-3 text-slate-500 text-xs">請用授權的 Google 帳號登入</p>
+  </div>
+</div>
+
+<div id="mainui">
+<!-- Nav -->
+<nav class="bg-slate-800 text-white px-6 py-3 flex items-center justify-between shadow-md sticky top-0 z-20">
+  <a href="#" onclick="go('list')" class="text-base font-bold tracking-wide hover:text-slate-300">IR 扣點管理系統</a>
+  <div class="flex gap-5 text-slate-300 text-xs font-medium items-center">
+    <a href="#" onclick="go('list')" class="hover:text-white transition">總覽</a>
+    <a href="#" onclick="openAddCustomer()" class="hover:text-white transition">＋ 新增客戶</a>
+    <label class="hover:text-white transition cursor-pointer">↑ 匯入 Excel
+      <input type="file" id="importFile" accept=".xlsx,.xls" class="hidden" onchange="importExcel(event)">
+    </label>
+    <a href="#" onclick="exportExcel()" class="hover:text-white transition">↓ 匯出 Excel</a>
+    <span class="text-slate-500">|</span>
+    <span id="syncBadge" class="text-slate-400 text-xs">● 已同步</span>
+    <span id="me" class="flex items-center gap-2"></span>
+  </div>
+</nav>
+
+<div class="max-w-7xl mx-auto px-4 py-6">
+  <div id="flash"></div>
+  <div id="app"></div>
+</div>
+</div><!-- /mainui -->
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   資料層（雲端版：Google 登入 + Apps Script + Google Sheet）
+   三張表：customers / orders / deductions
+   ═══════════════════════════════════════════════════════════════ */
+const CFG = window.APP_CONFIG || {};
+let DB = { customers:[], orders:[], deductions:[], seq:1 };
+let ID_TOKEN = "";        // Google 憑證，寫回時附帶供後端驗證
+let CURRENT_EMAIL = "";
+
+/* id：資料存 Sheet 沒有 seq，載入時用現有最大 id + 1 */
+function recomputeSeq(){
+  let max = 0;
+  ["customers","orders","deductions"].forEach(t=>DB[t].forEach(r=>{ const n=+r.id; if(n>max) max=n; }));
+  DB.seq = max + 1;
+}
+function nextId(){ return DB.seq++; }
+
+/* 從 Apps Script 讀全部 */
+async function cloudLoad(){
+  const url = CFG.API_URL + (CFG.API_URL.includes("?")?"&":"?") + "token=" + encodeURIComponent(ID_TOKEN);
+  const res = await fetch(url, {method:"GET"});
+  const j = await res.json();
+  if(!j.ok) throw new Error(j.error || "讀取失敗");
+  const d = j.data || {};
+  DB = {
+    customers:  (d.customers ||[]).map(normCustomer),
+    orders:     (d.orders    ||[]).map(normOrder),
+    deductions: (d.deductions||[]).map(normDeduction),
+    seq: 1,
+  };
+  recomputeSeq();
+}
+/* Sheet 讀回來的值可能是字串/數字，正規化型別 */
+function normCustomer(r){ return { id:+r.id, name:String(r.name||""), sales_rep:r.sales_rep||null, deduction_rule:r.deduction_rule||null, notes:r.notes||null }; }
+function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:String(r.order_date||""), points_added:+r.points_added||0, note:r.note||null }; }
+function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:String(r.check_date||""), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
+
+/* 寫回 Apps Script（整批覆寫三張表） */
+let saveT, savingInFlight=false, savePending=false;
+async function cloudSave(){
+  if(savingInFlight){ savePending=true; return; }
+  savingInFlight=true; setSync("saving");
+  try{
+    const payload = { token: ID_TOKEN, data: { customers:DB.customers, orders:DB.orders, deductions:DB.deductions } };
+    const res = await fetch(CFG.API_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload) });
+    const j = await res.json();
+    if(!j.ok) throw new Error(j.error || "儲存失敗");
+    setSync("ok");
+  }catch(e){ console.error(e); setSync("err", e.message); }
+  finally{ savingInFlight=false; if(savePending){ savePending=false; cloudSave(); } }
+}
+/* 對外沿用 save()：防抖後寫雲端 */
+function save(){ clearTimeout(saveT); saveT=setTimeout(cloudSave, 600); }
+function setSync(state, msg){
+  const el=$("#syncBadge"); if(!el) return;
+  if(state==="saving"){ el.textContent="● 儲存中…"; el.className="text-yellow-300 text-xs"; }
+  else if(state==="err"){ el.textContent="● 儲存失敗"; el.className="text-red-300 text-xs"; el.title=msg||""; }
+  else { el.textContent="● 已同步"; el.className="text-emerald-300 text-xs"; el.title=""; }
+}
+
+/* ── 計算：對應原 _customers_query 的彙總 ── */
+function customerStats(cid){
+  const granted = DB.orders.filter(o=>o.customer_id===cid).reduce((s,o)=>s+(+o.points_added||0),0);
+  const used    = DB.deductions.filter(d=>d.customer_id===cid).reduce((s,d)=>s+(+d.points_used||0),0);
+  const lastDed = DB.deductions.filter(d=>d.customer_id===cid).map(d=>d.check_date).filter(Boolean).sort().pop() || null;
+  return { granted, used, remaining: granted-used, lastDeduction: lastDed };
+}
+function customersWithStats(){
+  return DB.customers.map(c=>({ ...c, ...customerStats(c.id) }))
+    .sort((a,b)=>a.remaining-b.remaining);   // 剩餘點數少的排前面（同原本 ORDER BY remaining ASC）
+}
+
+/* ── 小工具 ── */
+const $ = s=>document.querySelector(s);
+const esc = s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const todayISO = ()=> new Date().toISOString().slice(0,10);
+const fmt = n => (Math.round((+n||0)*100)/100).toString();
+let flashT;
+function flash(msg, type="success"){
+  const cls = type==="error" ? "bg-red-50 text-red-700 border-red-200" : "bg-green-50 text-green-700 border-green-200";
+  $("#flash").innerHTML = `<div class="mb-4 px-4 py-3 rounded-lg text-sm font-medium border ${cls}">${esc(msg)}</div>`;
+  clearTimeout(flashT); flashT=setTimeout(()=>$("#flash").innerHTML="", 3000);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   畫面路由
+   ═══════════════════════════════════════════════════════════════ */
+let view = { name:"list", cid:null };
+function go(name, cid=null){ view={name,cid}; render(); window.scrollTo(0,0); }
+function render(){
+  if(view.name==="list") return renderList();
+  if(view.name==="detail") return renderDetail(view.cid);
+}
+
+/* ── 總覽列表 ── */
+function renderList(){
+  const rows = customersWithStats();
+  const negative = rows.filter(c=>c.remaining<0);
+  const low      = rows.filter(c=>c.remaining>=0 && c.remaining<20);
+  const salesList = [...new Set(DB.customers.map(c=>c.sales_rep).filter(Boolean))].sort();
+
+  $("#app").innerHTML = `
+  <div class="grid grid-cols-3 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase tracking-wide mb-1">客戶總數</p><p class="text-3xl font-bold text-slate-800">${rows.length}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase tracking-wide mb-1">⚠ 負點數</p><p class="text-3xl font-bold text-red-600">${negative.length}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase tracking-wide mb-1">🔔 低點數（&lt;20）</p><p class="text-3xl font-bold text-yellow-500">${low.length}</p></div>
+  </div>
+  ${negative.length?`<div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-4"><p class="font-semibold text-red-700 mb-2">❌ 以下客戶點數已透支，請盡速補點：</p><div class="flex flex-wrap gap-2">${negative.map(c=>`<a href="#" onclick="go('detail',${c.id})" class="bg-red-100 hover:bg-red-200 text-red-800 text-xs font-semibold px-3 py-1 rounded-full transition">${esc(c.name)} (${fmt(c.remaining)})</a>`).join("")}</div></div>`:""}
+  ${low.length?`<div class="bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-6"><p class="font-semibold text-yellow-700 mb-2">🔔 以下客戶點數不足 20 點：</p><div class="flex flex-wrap gap-2">${low.map(c=>`<a href="#" onclick="go('detail',${c.id})" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-800 text-xs font-semibold px-3 py-1 rounded-full transition">${esc(c.name)} (${fmt(c.remaining)})</a>`).join("")}</div></div>`:""}
+
+  <div class="bg-white rounded-xl shadow-sm">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <h2 class="font-semibold text-slate-700">客戶列表</h2>
+      <div class="flex gap-3">
+        <input id="search" type="text" placeholder="搜尋客戶 / 業務..." oninput="renderRows()"
+               class="border border-slate-200 rounded-lg px-3 py-1.5 text-xs w-52 focus:outline-none focus:ring-2 focus:ring-blue-300">
+        <select id="filter-sales" onchange="renderRows()"
+                class="border border-slate-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-300">
+          <option value="">全部業務</option>${salesList.map(s=>`<option>${esc(s)}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-left">
+        <thead class="text-xs text-slate-400 uppercase border-b border-slate-100">
+          <tr>
+            <th class="px-5 py-3">客戶</th><th class="px-5 py-3">業務</th>
+            <th class="px-5 py-3 text-right">剩餘點數</th><th class="px-5 py-3 text-right">總購買</th>
+            <th class="px-5 py-3 text-right">總使用</th><th class="px-5 py-3">最後扣點</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>`;
+  renderRows();
+}
+function renderRows(){
+  const q = ($("#search")?.value||"").trim().toLowerCase();
+  const fs = $("#filter-sales")?.value||"";
+  let rows = customersWithStats();
+  if(fs) rows = rows.filter(c=>c.sales_rep===fs);
+  if(q) rows = rows.filter(c=>((c.name||"")+" "+(c.sales_rep||"")).toLowerCase().includes(q));
+  const tb = $("#rows");
+  if(!rows.length){ tb.innerHTML = `<tr><td colspan="6" class="px-5 py-8 text-center text-slate-400">沒有客戶。上方「＋ 新增客戶」或「↑ 匯入 Excel」開始。</td></tr>`; return; }
+  tb.innerHTML = rows.map(c=>{
+    const rc = c.remaining<0 ? "text-red-600 font-bold" : c.remaining<20 ? "text-yellow-600 font-bold" : "text-slate-800 font-semibold";
+    return `<tr class="border-b border-slate-50 hover:bg-slate-50 cursor-pointer" onclick="go('detail',${c.id})">
+      <td class="px-5 py-3 font-medium">${esc(c.name)}</td>
+      <td class="px-5 py-3 text-slate-500">${esc(c.sales_rep||"—")}</td>
+      <td class="px-5 py-3 text-right ${rc}">${fmt(c.remaining)}</td>
+      <td class="px-5 py-3 text-right text-slate-500">${fmt(c.granted)}</td>
+      <td class="px-5 py-3 text-right text-slate-500">${fmt(c.used)}</td>
+      <td class="px-5 py-3 text-slate-500">${c.lastDeduction||"—"}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* ── 客戶明細 ── */
+function renderDetail(cid){
+  const c = DB.customers.find(x=>x.id===cid);
+  if(!c){ flash("客戶不存在","error"); return go("list"); }
+  const st = customerStats(cid);
+  const deductions = DB.deductions.filter(d=>d.customer_id===cid).sort((a,b)=>(b.check_date||"").localeCompare(a.check_date||""));
+  const orders     = DB.orders.filter(o=>o.customer_id===cid).sort((a,b)=>(b.order_date||"").localeCompare(a.order_date||""));
+  const rc = st.remaining<0 ? "text-red-600" : st.remaining<20 ? "text-yellow-600" : "text-slate-800";
+
+  $("#app").innerHTML = `
+  <a href="#" onclick="go('list')" class="text-slate-500 hover:text-slate-700 text-xs">← 回總覽</a>
+  <div class="flex items-start justify-between mt-2 mb-5">
+    <!-- 檢視模式 -->
+    <div id="custView">
+      <h1 class="text-2xl font-bold text-slate-800">${esc(c.name)}</h1>
+      <p class="text-slate-500 text-xs mt-1">業務：${esc(c.sales_rep||"—")}</p>
+      ${c.notes?`<p class="text-slate-500 text-xs mt-1">備註：${esc(c.notes)}</p>`:""}
+    </div>
+    <!-- 編輯模式（就地） -->
+    <div id="custEdit" class="hidden bg-white rounded-xl shadow-sm p-4 w-full max-w-lg space-y-2">
+      <label class="block text-xs text-slate-500">客戶名稱 *<input id="ec_name" value="${esc(c.name)}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"></label>
+      <label class="block text-xs text-slate-500">業務<input id="ec_sales" value="${esc(c.sales_rep||"")}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"></label>
+      <label class="block text-xs text-slate-500">備註<input id="ec_notes" value="${esc(c.notes||"")}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"></label>
+      <div class="flex gap-2 pt-1">
+        <button onclick="saveCustomer(${cid})" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg">儲存</button>
+        <button onclick="cancelEditCustomer()" class="text-xs bg-slate-100 hover:bg-slate-200 px-4 py-1.5 rounded-lg">取消</button>
+      </div>
+    </div>
+    <div id="custBtns" class="flex gap-2 flex-none ml-4">
+      <button onclick="startEditCustomer()" class="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg">編輯客戶</button>
+      <button onclick="deleteCustomer(${cid})" class="text-xs bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded-lg">刪除客戶</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-3 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">剩餘點數</p><p class="text-3xl font-bold ${rc}">${fmt(st.remaining)}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">總購買</p><p class="text-3xl font-bold text-slate-700">${fmt(st.granted)}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">總使用</p><p class="text-3xl font-bold text-slate-700">${fmt(st.used)}</p></div>
+  </div>
+
+  <!-- 扣點規則：點一下就地編輯 -->
+  <div class="bg-white rounded-xl shadow-sm p-5 mb-6">
+    <div class="flex items-center justify-between mb-2">
+      <p class="text-slate-500 text-xs uppercase tracking-wide">扣點規則</p>
+      <button id="ruleEditBtn" onclick="startEditRule(${cid})" class="text-xs text-blue-600 hover:text-blue-800">✎ 編輯</button>
+    </div>
+    <div id="ruleView" class="text-slate-700 whitespace-pre-wrap ${c.deduction_rule?"":"text-slate-400 italic"}">${c.deduction_rule?esc(c.deduction_rule):"尚未設定，點右上「編輯」新增"}</div>
+    <div id="ruleEdit" class="hidden">
+      <textarea id="ruleText" rows="3" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" placeholder="例如：每台 Server 2 點、每台 User 1 點；或這家客戶的特殊計價方式…">${esc(c.deduction_rule||"")}</textarea>
+      <div class="flex gap-2 mt-2">
+        <button onclick="saveRule(${cid})" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg">儲存</button>
+        <button onclick="cancelEditRule()" class="text-xs bg-slate-100 hover:bg-slate-200 px-4 py-1.5 rounded-lg">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-2 gap-6">
+    <!-- 扣點 -->
+    <div class="bg-white rounded-xl shadow-sm">
+      <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center"><h2 class="font-semibold text-slate-700">扣點紀錄</h2><button onclick="toggleForm('dedForm')" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg">＋ 新增扣點</button></div>
+      <form id="dedForm" class="hidden px-5 py-4 border-b border-slate-100 bg-slate-50 space-y-2" onsubmit="addDeduction(event,${cid})">
+        <div class="grid grid-cols-2 gap-2">
+          <label class="text-xs text-slate-500">檢查日期<input name="check_date" type="date" value="${todayISO()}" class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">使用點數 *<input name="points_used" type="number" step="any" required class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">Server 數<input name="server_count" type="number" class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">User 數<input name="user_count" type="number" class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">案件編號<input name="case_number" class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">備註<input name="note" class="mt-1 w-full border rounded px-2 py-1"></label>
+        </div>
+        <button class="text-xs bg-blue-600 text-white px-4 py-1.5 rounded-lg">儲存扣點</button>
+      </form>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs">
+        <thead class="text-slate-400 uppercase border-b border-slate-100"><tr><th class="px-4 py-2">日期</th><th class="px-4 py-2">Srv/Usr</th><th class="px-4 py-2 text-right">點數</th><th class="px-4 py-2">案件</th><th class="px-4 py-2"></th></tr></thead>
+        <tbody>${deductions.length?deductions.map(d=>`<tr class="border-b border-slate-50"><td class="px-4 py-2">${d.check_date||"—"}</td><td class="px-4 py-2 text-slate-500">${d.server_count??"—"}/${d.user_count??"—"}</td><td class="px-4 py-2 text-right font-semibold text-red-600">-${fmt(d.points_used)}</td><td class="px-4 py-2 text-slate-500">${esc(d.case_number||"—")}</td><td class="px-4 py-2 text-right"><button onclick="delDeduction(${d.id},${cid})" class="text-slate-300 hover:text-red-500">✕</button></td></tr>`).join(""):`<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400">尚無扣點</td></tr>`}</tbody>
+      </table></div>
+    </div>
+
+    <!-- 補點 -->
+    <div class="bg-white rounded-xl shadow-sm">
+      <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center"><h2 class="font-semibold text-slate-700">補點紀錄</h2><button onclick="toggleForm('ordForm')" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg">＋ 新增補點</button></div>
+      <form id="ordForm" class="hidden px-5 py-4 border-b border-slate-100 bg-slate-50 space-y-2" onsubmit="addOrder(event,${cid})">
+        <div class="grid grid-cols-2 gap-2">
+          <label class="text-xs text-slate-500">購買日期<input name="order_date" type="date" value="${todayISO()}" class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500">新增點數 *<input name="points_added" type="number" step="any" required class="mt-1 w-full border rounded px-2 py-1"></label>
+          <label class="text-xs text-slate-500 col-span-2">備註<input name="note" class="mt-1 w-full border rounded px-2 py-1"></label>
+        </div>
+        <button class="text-xs bg-emerald-600 text-white px-4 py-1.5 rounded-lg">儲存補點</button>
+      </form>
+      <div class="overflow-x-auto"><table class="w-full text-left text-xs">
+        <thead class="text-slate-400 uppercase border-b border-slate-100"><tr><th class="px-4 py-2">日期</th><th class="px-4 py-2 text-right">點數</th><th class="px-4 py-2">備註</th><th class="px-4 py-2"></th></tr></thead>
+        <tbody>${orders.length?orders.map(o=>`<tr class="border-b border-slate-50"><td class="px-4 py-2">${o.order_date||"—"}</td><td class="px-4 py-2 text-right font-semibold text-emerald-600">+${fmt(o.points_added)}</td><td class="px-4 py-2 text-slate-500">${esc(o.note||"—")}</td><td class="px-4 py-2 text-right"><button onclick="delOrder(${o.id},${cid})" class="text-slate-300 hover:text-red-500">✕</button></td></tr>`).join(""):`<tr><td colspan="4" class="px-4 py-6 text-center text-slate-400">尚無補點</td></tr>`}</tbody>
+      </table></div>
+    </div>
+  </div>`;
+}
+function toggleForm(id){ const f=$("#"+id); f.classList.toggle("hidden"); }
+
+/* ═══════════════════════════════════════════════════════════════
+   寫入操作（對應原 Flask 各 route）
+   ═══════════════════════════════════════════════════════════════ */
+function openAddCustomer(){
+  const name = prompt("客戶名稱？"); if(!name) return;
+  if(DB.customers.some(c=>c.name===name.trim())){ flash(`客戶「${name}」已存在`,"error"); return; }
+  const sales = prompt("業務（可留空）？")||"";
+  const init  = prompt("初始購買點數（可留空）？")||"";
+  const c = { id:nextId(), name:name.trim(), sales_rep:sales.trim()||null, deduction_rule:null, notes:null };
+  DB.customers.push(c);
+  if(init && !isNaN(+init)) DB.orders.push({ id:nextId(), customer_id:c.id, order_date:todayISO(), points_added:+init, note:"初始購買點數" });
+  save(); flash(`客戶「${c.name}」已新增`); go("detail",c.id);
+}
+/* 客戶名稱 / 業務 / 備註 就地編輯 */
+function startEditCustomer(){
+  $("#custView").classList.add("hidden");
+  $("#custBtns").classList.add("hidden");
+  $("#custEdit").classList.remove("hidden");
+  $("#ec_name").focus();
+}
+function cancelEditCustomer(){
+  $("#custEdit").classList.add("hidden");
+  $("#custView").classList.remove("hidden");
+  $("#custBtns").classList.remove("hidden");
+}
+function saveCustomer(cid){
+  const c = DB.customers.find(x=>x.id===cid); if(!c) return;
+  const name = $("#ec_name").value.trim();
+  if(!name){ flash("請填寫客戶名稱","error"); return; }
+  // 名稱重複檢查（排除自己）
+  if(DB.customers.some(x=>x.id!==cid && x.name===name)){ flash(`客戶「${name}」已存在`,"error"); return; }
+  c.name = name;
+  c.sales_rep = $("#ec_sales").value.trim()||null;
+  c.notes = $("#ec_notes").value.trim()||null;
+  save(); flash("客戶資料已更新"); render();
+}
+/* 扣點規則就地編輯 */
+function startEditRule(cid){
+  $("#ruleView").classList.add("hidden");
+  $("#ruleEditBtn").classList.add("hidden");
+  $("#ruleEdit").classList.remove("hidden");
+  $("#ruleText").focus();
+}
+function cancelEditRule(){
+  $("#ruleEdit").classList.add("hidden");
+  $("#ruleView").classList.remove("hidden");
+  $("#ruleEditBtn").classList.remove("hidden");
+}
+function saveRule(cid){
+  const c = DB.customers.find(x=>x.id===cid); if(!c) return;
+  c.deduction_rule = $("#ruleText").value.trim() || null;
+  save(); flash("扣點規則已更新"); render();
+}
+
+function deleteCustomer(cid){
+  const c = DB.customers.find(x=>x.id===cid); if(!c) return;
+  if(!confirm(`確定刪除「${c.name}」及其所有點數紀錄？`)) return;
+  DB.customers = DB.customers.filter(x=>x.id!==cid);
+  DB.orders = DB.orders.filter(o=>o.customer_id!==cid);
+  DB.deductions = DB.deductions.filter(d=>d.customer_id!==cid);
+  save(); flash(`客戶「${c.name}」已刪除`); go("list");
+}
+function addDeduction(e,cid){
+  e.preventDefault(); const f=e.target;
+  DB.deductions.push({ id:nextId(), customer_id:cid,
+    check_date:f.check_date.value||todayISO(),
+    server_count:f.server_count.value?+f.server_count.value:null,
+    user_count:f.user_count.value?+f.user_count.value:null,
+    points_used:+f.points_used.value, case_number:f.case_number.value.trim()||null, note:f.note.value.trim()||null });
+  save(); flash("扣點記錄已新增"); render();
+}
+function addOrder(e,cid){
+  e.preventDefault(); const f=e.target;
+  DB.orders.push({ id:nextId(), customer_id:cid, order_date:f.order_date.value||todayISO(),
+    points_added:+f.points_added.value, note:f.note.value.trim()||null });
+  save(); flash("補點記錄已新增"); render();
+}
+function delDeduction(did,cid){ DB.deductions=DB.deductions.filter(d=>d.id!==did); save(); flash("扣點記錄已刪除"); render(); }
+function delOrder(oid,cid){ DB.orders=DB.orders.filter(o=>o.id!==oid); save(); flash("補點記錄已刪除"); render(); }
+
+/* ═══════════════════════════════════════════════════════════════
+   Excel 匯入 / 匯出（對應原 openpyxl 邏輯，格式相同 → 可共用）
+   ═══════════════════════════════════════════════════════════════ */
+function findSheet(names, cname){
+  for(const s of names) if(s.trim()===cname.trim()) return s;
+  for(const s of names) if(s.includes(cname)||cname.includes(s)) return s;
+  return null;
+}
+function importExcel(ev){
+  const file = ev.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e=>{
+    try{
+      const wb = XLSX.read(e.target.result, {type:"array", cellDates:true});
+      if(!wb.SheetNames.includes("總表")){ flash("找不到「總表」工作表","error"); return; }
+      const main = XLSX.utils.sheet_to_json(wb.Sheets["總表"], {header:1, raw:true});
+      let cImported=0, dImported=0;
+      for(let i=1;i<main.length;i++){
+        const row = main[i]; if(!row || !row[2]) continue;
+        const name = String(row[2]).trim();
+        if(DB.customers.some(c=>c.name===name)) continue;
+        const c = { id:nextId(), name,
+          sales_rep: row[1]?String(row[1]).trim():null,
+          deduction_rule: row[5]?String(row[5]).trim():null,
+          notes: row[7]?String(row[7]).trim():null };
+        DB.customers.push(c); cImported++;
+        const totalPts = (typeof row[4]==="number")?row[4]:0;
+        if(totalPts>0) DB.orders.push({ id:nextId(), customer_id:c.id, order_date:todayISO(), points_added:totalPts, note:"Excel 匯入 — 歷史累計點數" });
+        const sn = findSheet(wb.SheetNames, name);
+        if(sn){
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, raw:true});
+          for(const r of rows){
+            if(!r || !(r[0] instanceof Date)) continue;
+            const pts = r[3]; if(typeof pts!=="number") continue;
+            DB.deductions.push({ id:nextId(), customer_id:c.id,
+              check_date:r[0].toISOString().slice(0,10),
+              server_count:(r[1]!=null?r[1]:null), user_count:(r[2]!=null?r[2]:null),
+              points_used:pts, case_number:r[4]?String(r[4]).trim():null, note:(r[5]!=null?String(r[5]).trim():null) });
+            dImported++;
+          }
+        }
+      }
+      save(); flash(`匯入完成！新增 ${cImported} 個客戶，${dImported} 筆扣點紀錄`); go("list");
+    }catch(err){ flash("匯入失敗："+err.message,"error"); }
+  };
+  reader.readAsArrayBuffer(file);
+  ev.target.value="";
+}
+function exportExcel(){
+  const wb = XLSX.utils.book_new();
+  const rows = customersWithStats();
+  const main = [["#","業務","客戶名稱","剩餘點數","總購買點數","總使用點數","扣點規則","備註"]];
+  rows.forEach((c,i)=>main.push([i+1,c.sales_rep,c.name,c.remaining,c.granted,c.used,c.deduction_rule,c.notes]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(main), "總表");
+  rows.forEach(c=>{
+    const sheet=[["檢查日期","Server","User","使用點數","案件編號","備註"]];
+    DB.deductions.filter(d=>d.customer_id===c.id).sort((a,b)=>(a.check_date||"").localeCompare(b.check_date||""))
+      .forEach(d=>sheet.push([d.check_date,d.server_count,d.user_count,d.points_used,d.case_number,d.note]));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), c.name.slice(0,31));
+  });
+  XLSX.writeFile(wb, `扣點紀錄表_${todayISO()}.xlsx`);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Google 登入 + 白名單（治本版：憑證交後端驗）
+   ═══════════════════════════════════════════════════════════════ */
+function b64urlDecode(s){ s=s.replace(/-/g,"+").replace(/_/g,"/"); while(s.length%4)s+="="; return decodeURIComponent(escape(atob(s))); }
+function parseJwt(t){ try{ return JSON.parse(b64urlDecode(t.split(".")[1])); }catch(e){ return null; } }
+function gateMsg(m){ const el=$("#gateMsg"); if(el) el.textContent=m||""; }
+
+async function onSignedIn(profile){
+  CURRENT_EMAIL = (profile.email||"").toLowerCase();
+  const allow = (CFG.ALLOWED_EMAILS||[]).map(e=>String(e).toLowerCase());
+  if(allow.length && allow.indexOf(CURRENT_EMAIL)===-1){
+    gateMsg("此帳號（"+profile.email+"）未被授權。請改用授權帳號。");
+    try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+    return;
+  }
+  const me=$("#me");
+  if(me) me.innerHTML =
+    (profile.picture?`<img src="${profile.picture}" class="w-6 h-6 rounded-full" referrerpolicy="no-referrer">`:"")+
+    `<span class="text-slate-300">${esc(profile.name||profile.email)}</span>`+
+    `<button onclick="doLogout()" class="border border-slate-600 hover:bg-slate-700 text-slate-300 px-2 py-0.5 rounded text-xs">登出</button>`;
+  gateMsg("載入資料中…");
+  try{
+    await cloudLoad();
+    document.body.classList.add("authed");
+    render();
+    setSync("ok");
+  }catch(e){
+    gateMsg("讀取資料失敗："+e.message+"（請確認 config.js 的 API_URL 與 Apps Script 部署權限）");
+    console.error(e);
+  }
+}
+function doLogout(){
+  try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+  document.body.classList.remove("authed");
+  CURRENT_EMAIL=""; ID_TOKEN=""; DB={customers:[],orders:[],deductions:[],seq:1};
+  gateMsg("已登出"); location.reload();
+}
+function initGoogleAuth(){
+  if(!CFG.GOOGLE_CLIENT_ID || CFG.GOOGLE_CLIENT_ID.indexOf("apps.googleusercontent.com")===-1){
+    gateMsg("尚未設定 GOOGLE_CLIENT_ID（請編輯 config.js）"); return;
+  }
+  if(!window.google || !google.accounts || !google.accounts.id){ return setTimeout(initGoogleAuth, 300); }
+  google.accounts.id.initialize({
+    client_id: CFG.GOOGLE_CLIENT_ID,
+    callback: (resp)=>{
+      const p=parseJwt(resp.credential);
+      if(!p){ gateMsg("登入解析失敗，請重試"); return; }
+      ID_TOKEN = resp.credential;
+      onSignedIn(p);
+    },
+    auto_select: true,
+  });
+  google.accounts.id.renderButton($("#gBtn"), { theme:"filled_blue", size:"large", shape:"pill", text:"signin_with", locale:"zh_TW" });
+  google.accounts.id.prompt();
+}
+initGoogleAuth();
+</script>
+</body>
+</html>
