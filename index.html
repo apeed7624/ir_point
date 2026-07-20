@@ -87,8 +87,8 @@ async function cloudLoad(){
 }
 /* Sheet 讀回來的值可能是字串/數字，正規化型別 */
 function normCustomer(r){ return { id:+r.id, name:String(r.name||""), sales_rep:r.sales_rep||null, deduction_rule:r.deduction_rule||null, notes:r.notes||null }; }
-function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:String(r.order_date||""), points_added:+r.points_added||0, note:r.note||null }; }
-function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:String(r.check_date||""), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
+function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:dateOnly(r.order_date), points_added:+r.points_added||0, note:r.note||null }; }
+function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:dateOnly(r.check_date), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
 
 /* 寫回 Apps Script（整批覆寫三張表） */
 let saveT, savingInFlight=false, savePending=false;
@@ -149,6 +149,30 @@ function sortArrow(key){ return sortKey===key ? (sortDir===1?" ▲":" ▼") : ""
 const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const todayISO = ()=> new Date().toISOString().slice(0,10);
+/* 把任何日期輸入正規化成乾淨的 YYYY-MM-DD（處理 ISO 時間戳、時區位移、Date 物件） */
+function dateOnly(v){
+  if(v==null || v==="") return "";
+  if(v instanceof Date){                       // Date 物件 → 用當地日期,避免 UTC 差一天
+    const y=v.getFullYear(), m=String(v.getMonth()+1).padStart(2,"0"), d=String(v.getDate()).padStart(2,"0");
+    return `${y}-${m}-${d}`;
+  }
+  const s=String(v).trim();
+  // 已經是純日期
+  let m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(m) return s;
+  // ISO 時間戳（可能含 T…Z）→ 用 Date 轉「當地」日期，修正 UTC+8 午夜位移
+  if(/^\d{4}-\d{2}-\d{2}T/.test(s)){
+    const dt=new Date(s);
+    if(!isNaN(dt)){
+      const y=dt.getFullYear(), mo=String(dt.getMonth()+1).padStart(2,"0"), da=String(dt.getDate()).padStart(2,"0");
+      return `${y}-${mo}-${da}`;
+    }
+  }
+  // 其他格式（2025/12/4 之類）
+  m=s.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  if(m) return `${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`;
+  return s.slice(0,10);
+}
 const fmt = n => (Math.round((+n||0)*100)/100).toString();
 let flashT;
 function flash(msg, type="success"){
