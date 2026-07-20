@@ -120,10 +120,30 @@ function customerStats(cid){
   const lastDed = DB.deductions.filter(d=>d.customer_id===cid).map(d=>d.check_date).filter(Boolean).sort().pop() || null;
   return { granted, used, remaining: granted-used, lastDeduction: lastDed };
 }
-function customersWithStats(){
-  return DB.customers.map(c=>({ ...c, ...customerStats(c.id) }))
-    .sort((a,b)=>a.remaining-b.remaining);   // 剩餘點數少的排前面（同原本 ORDER BY remaining ASC）
+/* 排序狀態：預設依剩餘點數由少到多（同原本 ORDER BY remaining ASC） */
+let sortKey = "remaining", sortDir = 1;   // dir: 1 升冪, -1 降冪
+const NUM_KEYS = new Set(["remaining","granted","used"]);
+function setSort(key){
+  if(sortKey===key) sortDir*=-1; else { sortKey=key; sortDir=1; }
+  // 保留目前搜尋/篩選值,重繪整個列表(讓表頭箭頭也更新)
+  const q=$("#search")?.value||"", fs=$("#filter-sales")?.value||"";
+  renderList();
+  if($("#search")) $("#search").value=q;
+  if($("#filter-sales")) $("#filter-sales").value=fs;
+  renderRows();
 }
+function customersWithStats(){
+  const rows = DB.customers.map(c=>({ ...c, ...customerStats(c.id) }));
+  rows.sort((a,b)=>{
+    let av=a[sortKey], bv=b[sortKey];
+    if(NUM_KEYS.has(sortKey)){ av=+av||0; bv=+bv||0; return (av-bv)*sortDir; }
+    // 文字欄（客戶/業務/最後扣點）
+    av=(av==null?"":String(av)); bv=(bv==null?"":String(bv));
+    return av.localeCompare(bv,'zh-Hant')*sortDir;
+  });
+  return rows;
+}
+function sortArrow(key){ return sortKey===key ? (sortDir===1?" ▲":" ▼") : ""; }
 
 /* ── 小工具 ── */
 const $ = s=>document.querySelector(s);
@@ -177,11 +197,14 @@ function renderList(){
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-left">
-        <thead class="text-xs text-slate-400 uppercase border-b border-slate-100">
+        <thead class="text-xs text-slate-400 uppercase border-b border-slate-100 select-none">
           <tr>
-            <th class="px-5 py-3">客戶</th><th class="px-5 py-3">業務</th>
-            <th class="px-5 py-3 text-right">剩餘點數</th><th class="px-5 py-3 text-right">總購買</th>
-            <th class="px-5 py-3 text-right">總使用</th><th class="px-5 py-3">最後扣點</th>
+            <th class="px-5 py-3 cursor-pointer hover:text-slate-600" onclick="setSort('name')">客戶${sortArrow('name')}</th>
+            <th class="px-5 py-3 cursor-pointer hover:text-slate-600" onclick="setSort('sales_rep')">業務${sortArrow('sales_rep')}</th>
+            <th class="px-5 py-3 text-right cursor-pointer hover:text-slate-600" onclick="setSort('remaining')">剩餘點數${sortArrow('remaining')}</th>
+            <th class="px-5 py-3 text-right cursor-pointer hover:text-slate-600" onclick="setSort('granted')">總購買${sortArrow('granted')}</th>
+            <th class="px-5 py-3 text-right cursor-pointer hover:text-slate-600" onclick="setSort('used')">總使用${sortArrow('used')}</th>
+            <th class="px-5 py-3 cursor-pointer hover:text-slate-600" onclick="setSort('lastDeduction')">最後扣點${sortArrow('lastDeduction')}</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
