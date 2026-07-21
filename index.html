@@ -556,7 +556,6 @@ function renderOrders(){
       <h2 class="font-semibold text-slate-700">訂單追蹤</h2>
       <div class="flex gap-2 flex-wrap">
         <input id="oq" type="text" placeholder="搜尋公司 / 訂單號..." oninput="orderFilter.q=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-300">
-        <select onchange="orderFilter.cat=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">全部類別</option><option>PSP Support</option><option>Support</option></select>
         <select onchange="orderFilter.topup=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">補點:全部</option><option>未處理</option><option>已補點</option></select>
         <select onchange="orderFilter.survey=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">調查:全部</option><option>未執行</option><option>已執行</option></select>
       </div>
@@ -615,18 +614,13 @@ function importOrders(ev){
       const prev = {};
       DB.order_records.forEach(r=>{ prev[r.doc_no+"|"+r.entitlement+"|"+r.company] = r; });
       const out = [];
-      const toISO = v => { if(v instanceof Date) return dateOnly(v); return dateOnly(v); };
-      // PSP Support 分頁
-      if(wb.SheetNames.includes("PSP Support")){
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets["PSP Support"], {header:1, raw:true});
-        for(let i=1;i<rows.length;i++){ const r=rows[i]; if(!r||!r[1]) continue;
-          out.push(buildOrderRec("PSP Support", r[1], r[4], r[16], r[5], r[6], r[7], r[19], prev)); }
-      }
-      // Support 分頁
-      if(wb.SheetNames.includes("Support")){
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets["Support"], {header:1, raw:true});
-        for(let i=1;i<rows.length;i++){ const r=rows[i]; if(!r||!r[3]) continue;
-          out.push(buildOrderRec("Support", r[3], r[9], r[13], r[10], r[11], r[19], r[16], prev)); }
+      // 新格式：單一分頁「APT 訂單彙整」（找 APT 分頁，找不到就用第一個分頁）
+      const sheetName = wb.SheetNames.find(s=>s.includes("APT")) || wb.SheetNames[0];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1, raw:true});
+      // 欄位索引：0 訂單號, 3 公司, 6 服務, 7 起, 8 訖, 10 金額, 18 OrderType, 22 TAM
+      for(let i=1;i<rows.length;i++){
+        const r=rows[i]; if(!r || !r[3]) continue;   // 沒有公司名就跳過
+        out.push(buildOrderRec("APT", r[3], r[6], r[10], r[7], r[8], r[22], r[0], prev));
       }
       DB.order_records = out;
       recomputeSeq();
