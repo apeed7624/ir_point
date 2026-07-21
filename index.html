@@ -34,12 +34,16 @@
 <nav class="bg-slate-800 text-white px-6 py-3 flex items-center justify-between shadow-md sticky top-0 z-20">
   <a href="#" onclick="go('list')" class="text-base font-bold tracking-wide hover:text-slate-300">IR 扣點管理系統</a>
   <div class="flex gap-5 text-slate-300 text-xs font-medium items-center">
-    <a href="#" onclick="go('list')" class="hover:text-white transition">總覽</a>
+    <a href="#" onclick="go('list')" class="hover:text-white transition">扣點總覽</a>
+    <a href="#" onclick="go('orders')" class="hover:text-white transition">訂單追蹤</a>
     <a href="#" onclick="openAddCustomer()" class="hover:text-white transition">＋ 新增客戶</a>
-    <label class="hover:text-white transition cursor-pointer">↑ 匯入 Excel
+    <label class="hover:text-white transition cursor-pointer">↑ 匯入扣點
       <input type="file" id="importFile" accept=".xlsx,.xls" class="hidden" onchange="importExcel(event)">
     </label>
-    <a href="#" onclick="exportExcel()" class="hover:text-white transition">↓ 匯出 Excel</a>
+    <label class="hover:text-white transition cursor-pointer">↑ 匯入訂單
+      <input type="file" id="importOrderFile" accept=".xlsx,.xls" class="hidden" onchange="importOrders(event)">
+    </label>
+    <a href="#" onclick="exportExcel()" class="hover:text-white transition">↓ 匯出</a>
     <span class="text-slate-500">|</span>
     <span id="syncBadge" class="text-slate-400 text-xs">● 已同步</span>
     <span id="me" class="flex items-center gap-2"></span>
@@ -58,14 +62,14 @@
    三張表：customers / orders / deductions
    ═══════════════════════════════════════════════════════════════ */
 const CFG = window.APP_CONFIG || {};
-let DB = { customers:[], orders:[], deductions:[], seq:1 };
+let DB = { customers:[], orders:[], deductions:[], order_records:[], seq:1 };
 let ID_TOKEN = "";        // Google 憑證，寫回時附帶供後端驗證
 let CURRENT_EMAIL = "";
 
 /* id：資料存 Sheet 沒有 seq，載入時用現有最大 id + 1 */
 function recomputeSeq(){
   let max = 0;
-  ["customers","orders","deductions"].forEach(t=>DB[t].forEach(r=>{ const n=+r.id; if(n>max) max=n; }));
+  ["customers","orders","deductions","order_records"].forEach(t=>DB[t].forEach(r=>{ const n=+r.id; if(n>max) max=n; }));
   DB.seq = max + 1;
 }
 function nextId(){ return DB.seq++; }
@@ -81,6 +85,7 @@ async function cloudLoad(){
     customers:  (d.customers ||[]).map(normCustomer),
     orders:     (d.orders    ||[]).map(normOrder),
     deductions: (d.deductions||[]).map(normDeduction),
+    order_records: (d.order_records||[]).map(normOrderRec),
     seq: 1,
   };
   recomputeSeq();
@@ -89,6 +94,7 @@ async function cloudLoad(){
 function normCustomer(r){ return { id:+r.id, name:String(r.name||""), sales_rep:r.sales_rep||null, deduction_rule:r.deduction_rule||null, notes:r.notes||null }; }
 function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:dateOnly(r.order_date), points_added:+r.points_added||0, note:r.note||null }; }
 function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:dateOnly(r.check_date), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
+function normOrderRec(r){ return { id:+r.id, category:String(r.category||""), company:String(r.company||""), entitlement:String(r.entitlement||""), amount:(r.amount===""||r.amount==null)?null:+r.amount, start_date:dateOnly(r.start_date), end_date:dateOnly(r.end_date), tam:String(r.tam||""), doc_no:String(r.doc_no||""), topup_status:r.topup_status||"未處理", survey_status:r.survey_status||"未執行", note:r.note||null }; }
 
 /* 判斷是不是「憑證過期/無效」類的錯誤 */
 function isAuthError(msg){
@@ -109,7 +115,7 @@ let _tokenOnlyResolve = null;
 /* 寫回 Apps Script（整批覆寫三張表）；token 過期會自動重取再試一次 */
 let saveT, savingInFlight=false, savePending=false;
 async function _doSaveOnce(){
-  const payload = { token: ID_TOKEN, data: { customers:DB.customers, orders:DB.orders, deductions:DB.deductions } };
+  const payload = { token: ID_TOKEN, data: { customers:DB.customers, orders:DB.orders, deductions:DB.deductions, order_records:DB.order_records } };
   const res = await fetch(CFG.API_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload) });
   const j = await res.json();
   if(!j.ok) throw new Error(j.error || "儲存失敗");
@@ -218,6 +224,7 @@ function go(name, cid=null){ view={name,cid}; render(); window.scrollTo(0,0); }
 function render(){
   if(view.name==="list") return renderList();
   if(view.name==="detail") return renderDetail(view.cid);
+  if(view.name==="orders") return renderOrders();
 }
 
 /* ── 總覽列表 ── */
@@ -525,6 +532,122 @@ function exportExcel(){
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), c.name.slice(0,31));
   });
   XLSX.writeFile(wb, `扣點紀錄表_${todayISO()}.xlsx`);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   訂單追蹤頁
+   ═══════════════════════════════════════════════════════════════ */
+let orderFilter = { q:"", topup:"", survey:"", cat:"" };
+function renderOrders(){
+  const recs = DB.order_records;
+  const total = recs.length;
+  const needTopup = recs.filter(r=>r.topup_status!=="已補點").length;
+  const needSurvey = recs.filter(r=>r.survey_status!=="已執行").length;
+  const totalAmount = recs.reduce((s,r)=>s+(+r.amount||0),0);
+  $("#app").innerHTML = `
+  <div class="grid grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">訂單總數</p><p class="text-3xl font-bold text-slate-800">${total}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">訂單總金額</p><p class="text-2xl font-bold text-slate-800 mt-1">NT$${totalAmount.toLocaleString()}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">待補點</p><p class="text-3xl font-bold text-red-600">${needTopup}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">待一次性調查</p><p class="text-3xl font-bold text-yellow-500">${needSurvey}</p></div>
+  </div>
+  <div class="bg-white rounded-xl shadow-sm">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 flex-wrap gap-2">
+      <h2 class="font-semibold text-slate-700">訂單追蹤</h2>
+      <div class="flex gap-2 flex-wrap">
+        <input id="oq" type="text" placeholder="搜尋公司 / 訂單號..." oninput="orderFilter.q=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-300">
+        <select onchange="orderFilter.cat=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">全部類別</option><option>PSP Support</option><option>Support</option></select>
+        <select onchange="orderFilter.topup=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">補點:全部</option><option>未處理</option><option>已補點</option></select>
+        <select onchange="orderFilter.survey=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">調查:全部</option><option>未執行</option><option>已執行</option></select>
+      </div>
+    </div>
+    <div class="overflow-x-auto"><table class="w-full text-left">
+      <thead class="text-xs text-slate-400 uppercase border-b border-slate-100"><tr>
+        <th class="px-4 py-3">公司</th><th class="px-4 py-3">服務內容</th><th class="px-4 py-3 text-right">金額</th>
+        <th class="px-4 py-3">起訖</th><th class="px-4 py-3">TAM</th><th class="px-4 py-3">訂單號</th>
+        <th class="px-4 py-3 text-center">補點</th><th class="px-4 py-3 text-center">一次性調查</th><th class="px-4 py-3">備註</th>
+      </tr></thead>
+      <tbody id="orows"></tbody>
+    </table></div>
+  </div>`;
+  renderOrderRows();
+}
+function renderOrderRows(){
+  const f = orderFilter;
+  let recs = DB.order_records.slice();
+  if(f.cat) recs = recs.filter(r=>r.category===f.cat);
+  if(f.topup) recs = recs.filter(r=>r.topup_status===f.topup);
+  if(f.survey) recs = recs.filter(r=>r.survey_status===f.survey);
+  if(f.q){ const q=f.q.toLowerCase(); recs = recs.filter(r=>((r.company||"")+" "+(r.doc_no||"")+" "+(r.entitlement||"")).toLowerCase().includes(q)); }
+  const tb = $("#orows");
+  if(!recs.length){ tb.innerHTML = `<tr><td colspan="9" class="px-4 py-8 text-center text-slate-400">沒有訂單。用上方「↑ 匯入訂單」把「訂單彙整主檔.xlsx」匯進來。</td></tr>`; return; }
+  const money = n => n==null?"—":("NT$"+(+n).toLocaleString());
+  tb.innerHTML = recs.map(r=>{
+    const topupOn = r.topup_status==="已補點";
+    const surveyOn = r.survey_status==="已執行";
+    return `<tr class="border-b border-slate-50 hover:bg-slate-50 align-top">
+      <td class="px-4 py-3 font-medium">${esc(r.company)}<div class="text-slate-400 text-xs mt-0.5">${esc(r.category)}</div></td>
+      <td class="px-4 py-3 text-slate-600 text-xs max-w-xs">${esc(r.entitlement)}</td>
+      <td class="px-4 py-3 text-right text-slate-600 whitespace-nowrap">${money(r.amount)}</td>
+      <td class="px-4 py-3 text-slate-500 text-xs whitespace-nowrap">${r.start_date||"—"}<br>~ ${r.end_date||"—"}</td>
+      <td class="px-4 py-3 text-slate-500 text-xs">${esc(r.tam||"—")}</td>
+      <td class="px-4 py-3 text-slate-500 text-xs">${esc(r.doc_no||"—")}</td>
+      <td class="px-4 py-3 text-center"><button onclick="toggleTopup(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${topupOn?'bg-green-100 text-green-700':'bg-red-50 text-red-600'}">${topupOn?'已補點':'未處理'}</button></td>
+      <td class="px-4 py-3 text-center"><button onclick="toggleSurvey(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${surveyOn?'bg-green-100 text-green-700':'bg-yellow-50 text-yellow-600'}">${surveyOn?'已執行':'未執行'}</button></td>
+      <td class="px-4 py-3"><input value="${esc(r.note||'')}" onchange="setOrderNote(${r.id},this.value)" placeholder="備註…" class="border border-slate-200 rounded px-2 py-1 text-xs w-32"></td>
+    </tr>`;
+  }).join("");
+}
+function toggleTopup(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.topup_status=(r.topup_status==="已補點")?"未處理":"已補點"; save(); renderOrders(); }
+function toggleSurvey(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.survey_status=(r.survey_status==="已執行")?"未執行":"已執行"; save(); renderOrders(); }
+function setOrderNote(id,v){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.note=v.trim()||null; save(); }
+
+/* 匯入訂單彙整主檔（PSP Support + Support 兩分頁），保留既有標註 */
+function importOrders(ev){
+  const file = ev.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e=>{
+    try{
+      const wb = XLSX.read(e.target.result, {type:"array", cellDates:true});
+      // 用「訂單號+服務內容+公司」當識別，重匯時保留舊標註
+      const prev = {};
+      DB.order_records.forEach(r=>{ prev[r.doc_no+"|"+r.entitlement+"|"+r.company] = r; });
+      const out = [];
+      const toISO = v => { if(v instanceof Date) return dateOnly(v); return dateOnly(v); };
+      // PSP Support 分頁
+      if(wb.SheetNames.includes("PSP Support")){
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets["PSP Support"], {header:1, raw:true});
+        for(let i=1;i<rows.length;i++){ const r=rows[i]; if(!r||!r[1]) continue;
+          out.push(buildOrderRec("PSP Support", r[1], r[4], r[16], r[5], r[6], r[7], r[19], prev)); }
+      }
+      // Support 分頁
+      if(wb.SheetNames.includes("Support")){
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets["Support"], {header:1, raw:true});
+        for(let i=1;i<rows.length;i++){ const r=rows[i]; if(!r||!r[3]) continue;
+          out.push(buildOrderRec("Support", r[3], r[9], r[13], r[10], r[11], r[19], r[16], prev)); }
+      }
+      DB.order_records = out;
+      recomputeSeq();
+      save(); flash(`匯入完成！共 ${out.length} 筆訂單（標註已保留）`); go("orders");
+    }catch(err){ flash("匯入失敗："+err.message,"error"); }
+  };
+  reader.readAsArrayBuffer(file);
+  ev.target.value="";
+}
+function buildOrderRec(cat, company, ent, amount, sd, ed, tam, doc, prev){
+  company=String(company||"").trim(); ent=String(ent||"").trim(); doc=String(doc||"").trim();
+  const key = doc+"|"+ent+"|"+company;
+  const old = prev[key];
+  return {
+    id: old? old.id : nextId(),
+    category: cat, company, entitlement: ent,
+    amount: (typeof amount==="number")?amount:(amount?+String(amount).replace(/[^0-9.]/g,"")||null:null),
+    start_date: dateOnly(sd), end_date: dateOnly(ed),
+    tam: String(tam||"").trim(), doc_no: doc,
+    topup_status: old? old.topup_status : "未處理",
+    survey_status: old? old.survey_status : "未執行",
+    note: old? old.note : null,
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════════
