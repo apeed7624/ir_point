@@ -90,16 +90,45 @@ function normCustomer(r){ return { id:+r.id, name:String(r.name||""), sales_rep:
 function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:dateOnly(r.order_date), points_added:+r.points_added||0, note:r.note||null }; }
 function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:dateOnly(r.check_date), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
 
-/* 寫回 Apps Script（整批覆寫三張表） */
+/* 判斷是不是「憑證過期/無效」類的錯誤 */
+function isAuthError(msg){
+  return /憑證|token|登入|過期|invalid|expire|unauthor/i.test(String(msg||""));
+}
+/* 重新向 Google 要一個新 token（不清資料）；成功會更新 ID_TOKEN，回傳是否拿到 */
+function refreshToken(){
+  return new Promise(resolve=>{
+    let done=false;
+    const timer=setTimeout(()=>{ if(!done){ done=true; resolve(false); } }, 8000);
+    // 暫時攔截登入 callback，只取新 token、不重新載入資料（保護記憶體 DB）
+    _tokenOnlyResolve = (tok)=>{ if(done) return; done=true; clearTimeout(timer); ID_TOKEN=tok; resolve(true); };
+    try{ google.accounts.id.prompt(); }catch(e){ /* prompt 失敗就等逾時 */ }
+  });
+}
+let _tokenOnlyResolve = null;
+
+/* 寫回 Apps Script（整批覆寫三張表）；token 過期會自動重取再試一次 */
 let saveT, savingInFlight=false, savePending=false;
+async function _doSaveOnce(){
+  const payload = { token: ID_TOKEN, data: { customers:DB.customers, orders:DB.orders, deductions:DB.deductions } };
+  const res = await fetch(CFG.API_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload) });
+  const j = await res.json();
+  if(!j.ok) throw new Error(j.error || "儲存失敗");
+}
 async function cloudSave(){
   if(savingInFlight){ savePending=true; return; }
   savingInFlight=true; setSync("saving");
   try{
-    const payload = { token: ID_TOKEN, data: { customers:DB.customers, orders:DB.orders, deductions:DB.deductions } };
-    const res = await fetch(CFG.API_URL, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload) });
-    const j = await res.json();
-    if(!j.ok) throw new Error(j.error || "儲存失敗");
+    try{
+      await _doSaveOnce();
+    }catch(e){
+      // token 過期 → 自動重新登入拿新 token，再存一次
+      if(isAuthError(e.message)){
+        setSync("saving");
+        const ok = await refreshToken();
+        if(ok){ await _doSaveOnce(); }
+        else throw new Error("登入已過期，請點右上『登出』重新登入（資料仍在，重登後會保留）");
+      } else throw e;
+    }
     setSync("ok");
   }catch(e){ console.error(e); setSync("err", e.message); }
   finally{ savingInFlight=false; if(savePending){ savePending=false; cloudSave(); } }
@@ -531,6 +560,7 @@ async function onSignedIn(profile){
 }
 function doLogout(){
   try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+  try{ localStorage.removeItem("irpoint_signed_in"); }catch(e){}
   document.body.classList.remove("authed");
   CURRENT_EMAIL=""; ID_TOKEN=""; DB={customers:[],orders:[],deductions:[],seq:1};
   gateMsg("已登出"); location.reload();
@@ -545,13 +575,24 @@ function initGoogleAuth(){
     callback: (resp)=>{
       const p=parseJwt(resp.credential);
       if(!p){ gateMsg("登入解析失敗，請重試"); return; }
+      try{ localStorage.setItem("irpoint_signed_in","1"); }catch(e){}  // 記住登入意願
+      // 若是「存檔時 token 過期、只想拿新 token」→ 只更新 token，不重新載入（保護記憶體資料）
+      if(_tokenOnlyResolve){ const r=_tokenOnlyResolve; _tokenOnlyResolve=null; r(resp.credential); return; }
       ID_TOKEN = resp.credential;
       onSignedIn(p);
     },
-    auto_select: true,
+    auto_select: true,   // 曾登入過 → 自動選同一帳號，重整免手動點
   });
+  // 一律先放一顆按鈕當後備（自動登入失敗時才用得到）
   google.accounts.id.renderButton($("#gBtn"), { theme:"filled_blue", size:"large", shape:"pill", text:"signin_with", locale:"zh_TW" });
-  google.accounts.id.prompt();
+  // 主動嘗試自動登入
+  google.accounts.id.prompt((n)=>{
+    // 若 One Tap 沒顯示/被跳過，且使用者上次有登入過，提示一下（按鈕仍在，可點）
+    if(n && (n.isNotDisplayed && n.isNotDisplayed() || n.isSkippedMoment && n.isSkippedMoment())){
+      let signedBefore=false; try{ signedBefore = localStorage.getItem("irpoint_signed_in")==="1"; }catch(e){}
+      if(signedBefore) gateMsg("請點下方按鈕登入（將自動選擇上次的帳號）");
+    }
+  });
 }
 initGoogleAuth();
 </script>
