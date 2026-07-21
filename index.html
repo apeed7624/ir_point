@@ -565,7 +565,7 @@ function renderOrders(){
       <thead class="text-xs text-slate-400 uppercase border-b border-slate-100"><tr>
         <th class="px-4 py-3">公司</th><th class="px-4 py-3">服務內容</th><th class="px-4 py-3 text-right">金額</th>
         <th class="px-4 py-3">起訖</th><th class="px-4 py-3">TAM</th><th class="px-4 py-3">訂單號</th>
-        <th class="px-4 py-3 text-center">補點</th><th class="px-4 py-3 text-center">一次性調查</th><th class="px-4 py-3">備註</th>
+        <th class="px-4 py-3 text-center">補點</th><th class="px-4 py-3 text-center">一次性調查</th><th class="px-4 py-3">備註</th><th class="px-4 py-3"></th>
       </tr></thead>
       <tbody id="orows"></tbody>
     </table></div>
@@ -580,7 +580,7 @@ function renderOrderRows(){
   if(f.survey) recs = recs.filter(r=>r.survey_status===f.survey);
   if(f.q){ const q=f.q.toLowerCase(); recs = recs.filter(r=>((r.company||"")+" "+(r.doc_no||"")+" "+(r.entitlement||"")).toLowerCase().includes(q)); }
   const tb = $("#orows");
-  if(!recs.length){ tb.innerHTML = `<tr><td colspan="9" class="px-4 py-8 text-center text-slate-400">沒有訂單。用上方「↑ 匯入訂單」把「訂單彙整主檔.xlsx」匯進來。</td></tr>`; return; }
+  if(!recs.length){ tb.innerHTML = `<tr><td colspan="10" class="px-4 py-8 text-center text-slate-400">沒有訂單。用上方「↑ 匯入訂單」把「訂單彙整主檔.xlsx」匯進來。</td></tr>`; return; }
   const money = n => n==null?"—":("NT$"+(+n).toLocaleString());
   tb.innerHTML = recs.map(r=>{
     const topupOn = r.topup_status==="已補點";
@@ -595,12 +595,14 @@ function renderOrderRows(){
       <td class="px-4 py-3 text-center"><button onclick="toggleTopup(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${topupOn?'bg-green-100 text-green-700':'bg-red-50 text-red-600'}">${topupOn?'已補點':'未處理'}</button></td>
       <td class="px-4 py-3 text-center"><button onclick="toggleSurvey(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${surveyOn?'bg-green-100 text-green-700':'bg-yellow-50 text-yellow-600'}">${surveyOn?'已執行':'未執行'}</button></td>
       <td class="px-4 py-3"><input value="${esc(r.note||'')}" onchange="setOrderNote(${r.id},this.value)" placeholder="備註…" class="border border-slate-200 rounded px-2 py-1 text-xs w-32"></td>
+      <td class="px-4 py-3 text-right"><button onclick="deleteOrder(${r.id})" title="刪除此訂單" class="text-slate-300 hover:text-red-500 text-base leading-none">🗑</button></td>
     </tr>`;
   }).join("");
 }
 function toggleTopup(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.topup_status=(r.topup_status==="已補點")?"未處理":"已補點"; save(); renderOrders(); }
 function toggleSurvey(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.survey_status=(r.survey_status==="已執行")?"未執行":"已執行"; save(); renderOrders(); }
 function setOrderNote(id,v){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.note=v.trim()||null; save(); }
+function deleteOrder(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; if(!confirm(`刪除訂單「${r.company}」(${r.doc_no||"—"})?`))return; DB.order_records=DB.order_records.filter(x=>x.id!==id); save(); renderOrders(); }
 
 /* 匯入訂單彙整主檔（PSP Support + Support 兩分頁），保留既有標註 */
 function importOrders(ev){
