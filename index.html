@@ -94,7 +94,7 @@ async function cloudLoad(){
 function normCustomer(r){ return { id:+r.id, name:String(r.name||""), sales_rep:r.sales_rep||null, deduction_rule:r.deduction_rule||null, notes:r.notes||null }; }
 function normOrder(r){ return { id:+r.id, customer_id:+r.customer_id, order_date:dateOnly(r.order_date), points_added:+r.points_added||0, note:r.note||null }; }
 function normDeduction(r){ return { id:+r.id, customer_id:+r.customer_id, check_date:dateOnly(r.check_date), server_count:(r.server_count===""||r.server_count==null)?null:+r.server_count, user_count:(r.user_count===""||r.user_count==null)?null:+r.user_count, points_used:+r.points_used||0, case_number:r.case_number||null, note:r.note||null }; }
-function normOrderRec(r){ return { id:+r.id, category:String(r.category||""), company:String(r.company||""), entitlement:String(r.entitlement||""), amount:(r.amount===""||r.amount==null)?null:+r.amount, start_date:dateOnly(r.start_date), end_date:dateOnly(r.end_date), tam:String(r.tam||""), doc_no:String(r.doc_no||""), topup_status:r.topup_status||"未處理", survey_status:r.survey_status||"未執行", note:r.note||null }; }
+function normOrderRec(r){ return { id:+r.id, category:String(r.category||""), company:String(r.company||""), entitlement:String(r.entitlement||""), amount:(r.amount===""||r.amount==null)?null:+r.amount, start_date:dateOnly(r.start_date), end_date:dateOnly(r.end_date), tam:String(r.tam||""), doc_no:String(r.doc_no||""), topup_status:r.topup_status||"未處理", service_type:r.service_type||r.survey_status||"尚未確定", note:r.note||null }; }
 
 /* 判斷是不是「憑證過期/無效」類的錯誤 */
 function isAuthError(msg){
@@ -537,19 +537,22 @@ function exportExcel(){
 /* ═══════════════════════════════════════════════════════════════
    訂單追蹤頁
    ═══════════════════════════════════════════════════════════════ */
-let orderFilter = { q:"", topup:"", survey:"", cat:"" };
+let orderFilter = { q:"", topup:"", stype:"" };
+const SERVICE_TYPES = ["點數客戶","一次性客戶","尚未確定"];
 function renderOrders(){
   const recs = DB.order_records;
   const total = recs.length;
   const needTopup = recs.filter(r=>r.topup_status!=="已補點").length;
-  const needSurvey = recs.filter(r=>r.survey_status!=="已執行").length;
+  const cntPoint = recs.filter(r=>r.service_type==="點數客戶").length;
+  const cntOnce = recs.filter(r=>r.service_type==="一次性客戶").length;
   const totalAmount = recs.reduce((s,r)=>s+(+r.amount||0),0);
   $("#app").innerHTML = `
-  <div class="grid grid-cols-4 gap-4 mb-6">
+  <div class="grid grid-cols-5 gap-4 mb-6">
     <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">訂單總數</p><p class="text-3xl font-bold text-slate-800">${total}</p></div>
     <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">訂單總金額</p><p class="text-2xl font-bold text-slate-800 mt-1">NT$${totalAmount.toLocaleString()}</p></div>
     <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">待補點</p><p class="text-3xl font-bold text-red-600">${needTopup}</p></div>
-    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">待一次性調查</p><p class="text-3xl font-bold text-yellow-500">${needSurvey}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">點數客戶</p><p class="text-3xl font-bold text-blue-600">${cntPoint}</p></div>
+    <div class="bg-white rounded-xl shadow-sm p-5"><p class="text-slate-500 text-xs uppercase mb-1">一次性客戶</p><p class="text-3xl font-bold text-purple-600">${cntOnce}</p></div>
   </div>
   <div class="bg-white rounded-xl shadow-sm">
     <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 flex-wrap gap-2">
@@ -557,14 +560,14 @@ function renderOrders(){
       <div class="flex gap-2 flex-wrap">
         <input id="oq" type="text" placeholder="搜尋公司 / 訂單號..." oninput="orderFilter.q=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-300">
         <select onchange="orderFilter.topup=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">補點:全部</option><option>未處理</option><option>已補點</option></select>
-        <select onchange="orderFilter.survey=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">調查:全部</option><option>未執行</option><option>已執行</option></select>
+        <select onchange="orderFilter.stype=this.value;renderOrderRows()" class="border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="">服務類型:全部</option><option>點數客戶</option><option>一次性客戶</option><option>尚未確定</option></select>
       </div>
     </div>
     <div class="overflow-x-auto"><table class="w-full text-left">
       <thead class="text-xs text-slate-400 uppercase border-b border-slate-100"><tr>
         <th class="px-4 py-3">公司</th><th class="px-4 py-3">服務內容</th><th class="px-4 py-3 text-right">金額</th>
         <th class="px-4 py-3">起訖</th><th class="px-4 py-3">TAM</th><th class="px-4 py-3">訂單號</th>
-        <th class="px-4 py-3 text-center">補點</th><th class="px-4 py-3 text-center">一次性調查</th><th class="px-4 py-3">備註</th><th class="px-4 py-3"></th>
+        <th class="px-4 py-3 text-center">補點</th><th class="px-4 py-3 text-center">服務類型</th><th class="px-4 py-3">備註</th><th class="px-4 py-3"></th>
       </tr></thead>
       <tbody id="orows"></tbody>
     </table></div>
@@ -574,16 +577,16 @@ function renderOrders(){
 function renderOrderRows(){
   const f = orderFilter;
   let recs = DB.order_records.slice();
-  if(f.cat) recs = recs.filter(r=>r.category===f.cat);
   if(f.topup) recs = recs.filter(r=>r.topup_status===f.topup);
-  if(f.survey) recs = recs.filter(r=>r.survey_status===f.survey);
+  if(f.stype) recs = recs.filter(r=>r.service_type===f.stype);
   if(f.q){ const q=f.q.toLowerCase(); recs = recs.filter(r=>((r.company||"")+" "+(r.doc_no||"")+" "+(r.entitlement||"")).toLowerCase().includes(q)); }
   const tb = $("#orows");
   if(!recs.length){ tb.innerHTML = `<tr><td colspan="10" class="px-4 py-8 text-center text-slate-400">沒有訂單。用上方「↑ 匯入訂單」把「訂單彙整主檔.xlsx」匯進來。</td></tr>`; return; }
   const money = n => n==null?"—":("NT$"+(+n).toLocaleString());
+  const stColor = st => st==="點數客戶"?"text-blue-700 border-blue-300":st==="一次性客戶"?"text-purple-700 border-purple-300":"text-slate-500 border-slate-300";
   tb.innerHTML = recs.map(r=>{
     const topupOn = r.topup_status==="已補點";
-    const surveyOn = r.survey_status==="已執行";
+    const opts = SERVICE_TYPES.map(t=>`<option ${r.service_type===t?"selected":""}>${t}</option>`).join("");
     return `<tr class="border-b border-slate-50 hover:bg-slate-50 align-top">
       <td class="px-4 py-3 font-medium">${esc(r.company)}<div class="text-slate-400 text-xs mt-0.5">${esc(r.category)}</div></td>
       <td class="px-4 py-3 text-slate-600 text-xs max-w-xs">${esc(r.entitlement)}</td>
@@ -592,14 +595,14 @@ function renderOrderRows(){
       <td class="px-4 py-3 text-slate-500 text-xs">${esc(r.tam||"—")}</td>
       <td class="px-4 py-3 text-slate-500 text-xs">${esc(r.doc_no||"—")}</td>
       <td class="px-4 py-3 text-center"><button onclick="toggleTopup(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${topupOn?'bg-green-100 text-green-700':'bg-red-50 text-red-600'}">${topupOn?'已補點':'未處理'}</button></td>
-      <td class="px-4 py-3 text-center"><button onclick="toggleSurvey(${r.id})" class="text-xs font-semibold px-2.5 py-1 rounded-full ${surveyOn?'bg-green-100 text-green-700':'bg-yellow-50 text-yellow-600'}">${surveyOn?'已執行':'未執行'}</button></td>
+      <td class="px-4 py-3 text-center"><select onchange="setServiceType(${r.id},this.value)" class="text-xs font-semibold px-2 py-1 rounded-lg border bg-white ${stColor(r.service_type)}">${opts}</select></td>
       <td class="px-4 py-3"><input value="${esc(r.note||'')}" onchange="setOrderNote(${r.id},this.value)" placeholder="備註…" class="border border-slate-200 rounded px-2 py-1 text-xs w-32"></td>
       <td class="px-4 py-3 text-right"><button onclick="deleteOrder(${r.id})" title="刪除此訂單" class="text-slate-300 hover:text-red-500 text-base leading-none">🗑</button></td>
     </tr>`;
   }).join("");
 }
 function toggleTopup(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.topup_status=(r.topup_status==="已補點")?"未處理":"已補點"; save(); renderOrders(); }
-function toggleSurvey(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.survey_status=(r.survey_status==="已執行")?"未執行":"已執行"; save(); renderOrders(); }
+function setServiceType(id,v){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.service_type=v; save(); renderOrders(); }
 function setOrderNote(id,v){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; r.note=v.trim()||null; save(); }
 function deleteOrder(id){ const r=DB.order_records.find(x=>x.id===id); if(!r)return; if(!confirm(`刪除訂單「${r.company}」(${r.doc_no||"—"})?`))return; DB.order_records=DB.order_records.filter(x=>x.id!==id); save(); renderOrders(); }
 
@@ -641,7 +644,7 @@ function buildOrderRec(cat, company, ent, amount, sd, ed, tam, doc, prev){
     start_date: dateOnly(sd), end_date: dateOnly(ed),
     tam: String(tam||"").trim(), doc_no: doc,
     topup_status: old? old.topup_status : "未處理",
-    survey_status: old? old.survey_status : "未執行",
+    service_type: old? old.service_type : "尚未確定",
     note: old? old.note : null,
   };
 }
